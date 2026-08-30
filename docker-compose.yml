@@ -1,0 +1,112 @@
+# NInfer — local chat/agent inference engine for Hermes.
+#
+# Replaces LM Studio on the CHAT path. LM Studio is NOT retired by this file: the
+# MCP Server's embedding parity gate still needs it as the only independent
+# reference for the corpus vector space (see MCP Server/CLAUDE.md). What changes is
+# that LM Studio is no longer launched at boot and no longer serves qwen3.8-27b.
+#
+# Brought up by scripts/Start-VHStack.ps1 as its own tier, deliberately NOT merged
+# into the MCP Server compose: the memory server must boot and serve even when the
+# chat engine is down, and vice versa.
+#
+# HARD CONSTRAINT — single RTX 5090 (32,607 MiB). NInfer and LM Studio must never
+# hold model weights at the same time. The artifact is 16.96 GiB resident; LM
+# Studio's qwen3.8-27b GGUF is 17.7 GiB. Both at once does not fit. Freeing VRAM
+# by stopping LM Studio is an operator gate, per ninfer-spike/SPIKE-root.md.
+
+services:
+  chat-model:
+    image: ninfer:local
+    container_name: vigil-chat-model
+    restart: unless-stopped
+
+    # --model-id is load-bearing for a no-touch Hermes migration. Hermes'
+    # model.default is already `qwen/qwen3.8-27b`; overriding NInfer's artifact
+    # identity to that same string means the cutover changes only `provider` and
+    # `base_url`, never the model name. Keeps the rollback to LM Studio symmetric.
+    #
+    # --max-context 32768 matches what Start-VHStack.ps1 asked LM Studio to load,
+    # so context behaviour does not silently change across the cutover.
+    # --kv-capacity auto leaves 1024 MiB of sizing headroom (per --help).
+    entrypoint: ["ninfer-serve"]
+    command: >
+      /models/${NINFER_ARTIFACT:-qwen3_8_27b.ninfer}
+      --host 0.0.0.0
+      --port 3400
+      --model-id qwen/qwen3.8-27b
+      --max-context ${NINFER_MAX_CONTEXT:-32768}
+      --kv-capacity auto
+      --max-concurrency ${NINFER_MAX_CONCURRENCY:-2}
+      --api-key ${NINFER_API_KEY:?set NINFER_API_KEY in ninfer/.env}
+      --log-stats-interval-ms 0
+      --spec ${NINFER_SPEC:-mtp}
+      --draft-tokens ${NINFER_DRAFT_TOKENS:-3}
+      --lm-head-draft
+      --kv-dtype ${NINFER_KV_DTYPE:-bf16}
+      --request-log-jsonl /logs/requests.jsonl
+
+    # Speculative decoding. MTP is the ONLY backend available for this model —
+    # docs/serving.md:38 states DFlash is 35B-A3B text-only, so `--spec dflash` here
+    # would be a load error, not a slower path. --draft-tokens is capped at 5 for MTP
+    # (1..15 is the DFlash range). --lm-head-draft loads the optimized proposal head.
+    #
+    # Residency is FROZEN AT STARTUP by --spec/--draft-tokens: changing either is a
+    # restart and a VRAM re-plan, not a runtime knob.
+    #
+    # Measured on this host, groupwise-int, 5x512-token generations, thinking off:
+    #   MTP off  → 87.4 tok/s (sd 0.1)
+    #   MTP3     → see bench/RESULTS.md
+    # Published reference (docs/performance.md, Qwen3.6-27B groupwise-int, MTP3, C=1):
+    #   185.8 tok/s steady decode at 68.2% acceptance. Note that figure is Qwen3.6 —
+    #   the Qwen3.8 groupwise-int profile is explicitly outside the published campaign.
+    volumes:
+      # Full-precision per-request records, for the quantization-collapse watchdog
+      # (tools/check-collapse.sh). Append-only and unrotated by NInfer — it will grow
+      # without bound, so the watchdog reports its size and prune is manual.
+      - ./logs:/logs
+      # Artifacts live outside every repo, mirroring ~/.lmstudio/models.
+      # 16.96–20.02 GiB — never commit, never bind a repo path here. The fallback
+      # resolves per-host via USERPROFILE; set NINFER_MODELS_DIR in .env to override.
+      - ${NINFER_MODELS_DIR:-${USERPROFILE}/.ninfer/models}:/models:ro
+
+    ports:
+      # Loopback only. Hermes runs on the host and dials 127.0.0.1:3400.
+      # Nothing on the tailnet should reach the chat engine unauthenticated.
+      - "127.0.0.1:${NINFER_PORT:-3400}:3400"
+
+    # Pinned by device UUID rather than `count: 1`, for the same reason
+    # text-embedder is (MCP Server/docker-compose.yml): `count: 1` means "any
+    # eligible GPU", so adding a second card could silently rebind the engine.
+    # Defaults to index 0 so this works without a populated .env.
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["${NINFER_GPU_DEVICE_ID:-0}"]
+              capabilities: [gpu]
+
+    # The image has NO curl, wget, python3 or nc (verified 2026-08-23 against
+    # ninfer:local, Ubuntu 24.04.4 base) — so the usual `CMD curl -f /health`
+    # cannot work here. bash IS present, so this is a TCP-liveness probe via
+    # /dev/tcp.
+    #
+    # KNOWN GAP: this proves the port is accepting connections, NOT that /health
+    # returns ok or that the model is loaded. A wedged-but-listening server reads
+    # as healthy. Start-VHStack.ps1 does the real HTTP /health probe from the host.
+    # Tighten this if a curl-bearing NInfer image is ever built.
+    healthcheck:
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/3400"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      # Cold-loading a 16.96 GiB artifact from disk to VRAM is slow. Generous, so a
+      # normal start is never reported as a failure.
+      start_period: 180s
+
+    networks:
+      - ninfer-local
+
+networks:
+  ninfer-local:
+    driver: bridge
