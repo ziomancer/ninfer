@@ -44,6 +44,7 @@ services:
       --lm-head-draft
       --kv-dtype ${NINFER_KV_DTYPE:-bf16}
       --request-log-jsonl /logs/requests.jsonl
+      --default-max-tokens ${NINFER_DEFAULT_MAX_TOKENS:-8192}
 
     # Speculative decoding. MTP is the ONLY backend available for this model —
     # docs/serving.md:38 states DFlash is 35B-A3B text-only, so `--spec dflash` here
