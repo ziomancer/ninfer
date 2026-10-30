@@ -1,33 +1,84 @@
 from __future__ import annotations
 
 from pathlib import Path
+from argparse import Namespace
+import json
 
 import pytest
 
 from tools.bench.run_serve_corpus import (
-    CampaignError,
     Fixture,
     RunSpec,
     build_result_record,
-    require_server_log_identity,
-    summary_row,
+    parse_artifacts,
 )
+from tools.bench.run_serve_concurrency import build_points
+from tools.bench import run_serve_corpus as corpus
+from tools.bench import run_serve_concurrency as concurrency
+from tools.bench.ttft.diagnostics import attach_generation_diagnostics
 
 
-def test_request_log_v18_identity_is_accepted() -> None:
-    current = {
-        "artifact_type": "ninfer_serve_request_log",
-        "schema_version": 18,
-        "event": "server_start",
+@pytest.mark.parametrize(
+    "section,field",
+    [
+        ("scheduling", "preemptions"),
+        ("scheduling", "snapshot_restores"),
+        ("scheduling", "replay_restores"),
+        ("scheduling", "replayed_tokens"),
+        ("scheduler", "paused"),
+        ("scheduler", "replaying"),
+    ],
+)
+def test_steady_throughput_excludes_recovery(section: str, field: str) -> None:
+    steady = {
+        "interval_seconds": 1.0,
+        "tokens": {"computed_prefill": 0, "committed_decode": 400},
+        "decode_batch": {"rounds": 50, "row_rounds": 400},
+        "scheduler": {
+            "running": 8,
+            "prefilling": 0,
+            "decode_ready": 8,
+            "paused": 0,
+            "replaying": 0,
+        },
+        "scheduling": {
+            "preemptions": 0,
+            "snapshot_restores": 0,
+            "replay_restores": 0,
+            "replayed_tokens": 0,
+        },
     }
-    require_server_log_identity(current, "server_start")
+    recovery = {
+        **steady,
+        "interval_seconds": 10.0,
+        section: {**steady[section], field: 1},
+    }
+    resumed = {
+        **steady,
+        "tokens": {"computed_prefill": 0, "committed_decode": 800},
+        "decode_batch": {"rounds": 100, "row_rounds": 800},
+    }
 
-    stale = dict(current, schema_version=17)
-    with pytest.raises(CampaignError):
-        require_server_log_identity(stale, "server_start")
+    assert concurrency.steady_metrics([steady, recovery, resumed], 8) == {
+        "intervals": 2,
+        "seconds": 2.0,
+        "committed_decode_tokens": 1200,
+        "decode_rounds": 150,
+        "decode_row_rounds": 1200,
+        "average_decode_batch": 8.0,
+        "decode_tokens_per_second": 600.0,
+    }
+    with pytest.raises(corpus.CampaignError, match="no recovery-free full-batch"):
+        concurrency.steady_metrics([recovery], 8)
 
 
-def test_result_record_parses_request_host_exposure() -> None:
+@pytest.mark.parametrize(
+    "vision_samples,vision_seconds,expected_vision",
+    [(0, 0.0, None), (1, 0.0, 0.0), (2, 0.125, 0.125)],
+)
+def test_result_record_parses_production_timings(
+    vision_samples: int, vision_seconds: float, expected_vision: float | None,
+) -> None:
     fixture = Fixture(
         name="fixture",
         messages=[],
@@ -43,6 +94,7 @@ def test_result_record_parses_request_host_exposure() -> None:
         speculative_backend="mtp",
         draft_tokens=3,
         sampling_mode="greedy",
+        kv_dtype="fp8",
         fixture=fixture,
         seed=7,
     )
@@ -50,7 +102,7 @@ def test_result_record_parses_request_host_exposure() -> None:
     response = {"usage": {"prompt_tokens": 10, "completion_tokens": 5}}
     event = {
         "artifact_type": "ninfer_serve_request_log",
-        "schema_version": 18,
+        "schema_version": corpus.SERVER_LOG_SCHEMA_VERSION,
         "event": "request_done",
         "request": {
             "model": spec.model_id,
@@ -65,10 +117,14 @@ def test_result_record_parses_request_host_exposure() -> None:
         },
         "timings_seconds": {
             "prepare": 0.1,
-            "vision": 0.0,
+            "ttft": 0.875,
+            "vision_stream": vision_seconds,
             "prefill": 0.2,
             "decode": 0.4,
-            "total": 0.7,
+            "total": 1.3,
+        },
+        "execution": {
+            "max_rank_gpu_intervals": {"vision_stream": {"count": vision_samples}},
         },
         "speculative": {
             "backend": "mtp",
@@ -81,48 +137,274 @@ def test_result_record_parses_request_host_exposure() -> None:
             "queue_wait_seconds": 0.001,
             "host_exposed_seconds": {
                 "engine_boundary": 0.001,
-                "program_submit": 0.002,
-                "program_post": 0.003,
+                "session_call": 0.002,
+                "executor_poll": 0.003,
+                "executor_flush": 0.006,
                 "engine_commit_output": 0.004,
                 "engine_maintenance": 0.005,
-                "total": 0.015,
+                "total": 0.021,
             },
-            "device_wait_exposed_seconds": 0.3,
+            "scheduler_yield_exposed_seconds": 0.3,
             "decode": {
                 "host_exposed_seconds": 0.01,
-                "device_wait_exposed_seconds": 0.2,
+                "scheduler_yield_exposed_seconds": 0.2,
                 "rounds": 2,
             },
         },
     }
 
-    record = build_result_record(spec, "groupwise-int", payload, response, event)
-    assert record["schema_version"] == 6
-    assert record["metrics"]["engine_host_exposed_ms"] == pytest.approx(15.0)
-    assert record["metrics"]["decode_host_us_per_round"] == pytest.approx(5000.0)
-    assert record["metrics"]["decode_device_wait_us_per_round"] == pytest.approx(100000.0)
-
-
-def test_summary_retains_one_canonical_weights_id() -> None:
-    records = [{"weights_id": "nvfp4", "metrics": {}}]
-    row = summary_row(
-        "context_profile",
-        "qwen3_6_27b",
-        "fixture",
-        "fixture",
-        "mtp0",
-        "greedy",
-        records,
+    record = build_result_record(
+        spec, "measured-prefill-bindings", payload, response, event
     )
-    assert row["weights_id"] == "nvfp4"
+    assert record["schema_version"] == 9
+    assert record["kv_dtype"] == "fp8"
+    assert record["metrics"]["server_ttft_ms"] == pytest.approx(875.0)
+    assert record["metrics"]["vision_stream_seconds"] == expected_vision
+    assert record["metrics"]["vision_stream_samples"] == vision_samples
+    assert record["metrics"]["executor_flush_exposed_seconds"] == pytest.approx(0.006)
+    assert record["metrics"]["engine_host_exposed_ms"] == pytest.approx(21.0)
+    assert record["metrics"]["decode_host_us_per_round"] == pytest.approx(5000.0)
+    assert record["metrics"]["decode_scheduler_yield_us_per_round"] == pytest.approx(
+        100000.0
+    )
 
-    with pytest.raises(CampaignError):
-        summary_row(
-            "context_profile",
-            "qwen3_6_27b",
-            "fixture",
-            "fixture",
-            "mtp0",
-            "greedy",
-            [*records, {"weights_id": "groupwise-int", "metrics": {}}],
+
+@pytest.mark.parametrize("resource_case", ["single", "pair", "missing", "partial"])
+def test_startup_resources_reach_concurrency_and_ttft_reports(
+    tmp_path: Path, resource_case: str,
+) -> None:
+    ranks = [
+        {
+            "rank": rank,
+            "node": rank,
+            "device": 0,
+            "hardware": "test-gpu",
+            "shared_physical_memory": True,
+            "budget": {"context_capacity_bytes": (rank + 1) * 1024},
+            "resources": {"allocations": {"context_device_bytes": (rank + 1) * 1024}},
+        }
+        for rank in range(1 if resource_case == "single" else 2)
+    ]
+    resources = {
+        "ranks": ranks,
+        "total_allocations": {
+            "context_device_bytes": sum(
+                rank["budget"]["context_capacity_bytes"] for rank in ranks
+            ),
+        },
+    }
+    start = {
+        "artifact_type": "ninfer_serve_request_log",
+        "schema_version": corpus.SERVER_LOG_SCHEMA_VERSION,
+        "event": "server_start",
+        "server_instance_id": "serve-test",
+    }
+    if resource_case != "missing":
+        start["resources"] = resources
+    if resource_case == "partial":
+        del ranks[-1]["resources"]
+
+    fixture = Fixture("fixture", [], False, 2, "test")
+    point = concurrency.Point(
+        "model", "model", tmp_path / "model.ninfer", "mtp0", "none", 0,
+        "full", "greedy", "fp8", "corpus-makespan", 1,
+    )
+    done = {
+        "event": "request_done",
+        "result": {
+            "prompt_tokens": 10, "completion_tokens": 2, "computed_prefill_tokens": 10,
+        },
+        "speculative": {
+            "rounds": 0, "drafted_tokens": 0, "accepted_tokens": 0, "fallback_steps": 0,
+        },
+    }
+    interval = {
+        "event": "throughput",
+        "tokens": {"computed_prefill": 10, "committed_decode": 1},
+        "decode_batch": {"rounds": 1, "row_rounds": 1},
+    }
+    result = concurrency.ClientResult(
+        concurrency.Job(0, 0, fixture, 1, 2), 0.0, 1.0, 10, 2, "output_limit",
+    )
+    log = tmp_path / "server.jsonl"
+    point_report = concurrency.analyze_point(
+        point, [], log, start, "bindings", [done, interval], [result], 0.0, 1.0,
+    )
+    # Startup resources remain usable even when runtime intervals have not been logged yet.
+    log.write_text(json.dumps(start) + "\n")
+    run = {"requests": []}
+    assert attach_generation_diagnostics(run, log) is None
+    observed = run["global_diagnostics"]
+    assert observed["reason"] == "runtime_intervals_missing"
+    if resource_case in ("single", "pair"):
+        expected = {"status": "available", **resources}
+    else:
+        reason = (
+            "startup_resources_missing" if resource_case == "missing"
+            else "startup_resources_invalid"
         )
+        expected = {"status": "unavailable", "reason": reason}
+    assert point_report["resources"] == expected
+    assert observed["startup_resources"] == expected
+
+
+def test_arbitrary_artifact_labels_reach_the_requested_backend(tmp_path: Path) -> None:
+    artifact = tmp_path / "custom.ninfer"
+    artifact.touch()
+    artifacts = parse_artifacts([f"org/custom={artifact}", f"org%2Fcustom={artifact}"])
+    points = build_points(
+        artifacts,
+        Namespace(
+            mode=["dflash7", "dflash2_7"],
+            suite=["decode-saturation"],
+            concurrency=[1],
+            sampling="greedy",
+            kv_dtype="fp8",
+            proposal_head="optimized",
+        ),
+    )
+    assert [(point.target, point.speculative_backend) for point in points] == [
+        ("org/custom", "dflash"),
+        ("org/custom", "dflash2"),
+        ("org%2Fcustom", "dflash"),
+        ("org%2Fcustom", "dflash2"),
+    ]
+    assert all(
+        point.artifact == artifact and point.model_id == point.target
+        for point in points
+    )
+    assert len({point.key for point in points}) == len(points)
+    for point in points:
+        (tmp_path / f"{point.key}.json").write_text("{}")
+
+
+@pytest.mark.parametrize("kv_dtype", ["int8", "fp8"])
+@pytest.mark.parametrize(
+    "concurrent,mode,head",
+    [
+        (False, "mtp0", "full"),
+        (True, "mtp0", "full"),
+        (False, "mtp5", "optimized"),
+        (True, "mtp5", "optimized"),
+        (True, "mtp5", "full"),
+    ],
+)
+def test_selected_kv_reaches_server_and_is_verified(
+    tmp_path, kv_dtype, concurrent, mode, head
+):
+    artifact = tmp_path / "model.ninfer"
+    artifact.touch()
+    common = [
+        "--serve",
+        "serve",
+        "--artifact",
+        f"model={artifact}",
+        "--output",
+        str(tmp_path),
+        "--mode",
+        mode,
+        "--kv-dtype",
+        kv_dtype,
+    ]
+    backend, draft_tokens = corpus.SPECULATIVE_MODES[mode]
+    engine = {
+        "device": 0,
+        "max_context": 262144,
+        "context_capacity_mode": "auto",
+        "prefill_chunk": 1024,
+        "kv_cache": kv_dtype,
+        "cuda_graph": True,
+        "prefix_reuse": False,
+        "speculative_backend": backend,
+        "speculative_draft_window": draft_tokens,
+        "proposal_head": head,
+        "context_cache": {"host_capacity_bytes": 0},
+    }
+    event = {
+        "artifact_type": corpus.SERVER_LOG_ARTIFACT_TYPE,
+        "schema_version": corpus.SERVER_LOG_SCHEMA_VERSION,
+        "event": "server_start",
+        "engine": engine,
+        "sampling_defaults": {"server_overrides": {"temperature": 0.6}},
+        "artifact": {"path": str(artifact), "prefill_signature": "bindings"},
+        "server": {"public_model_id": "model"},
+        "server_instance_id": "instance",
+    }
+    if concurrent:
+        args = concurrency.parse_args(
+            common + ["--suite", "decode-saturation", "--concurrency", "1",
+                      "--proposal-head", head]
+        )
+        point = build_points([("model", artifact)], args)[0]
+        command = concurrency.server_command(
+            Path("serve"), point, tmp_path / "log", args
+        )
+        engine.update(
+            context_capacity_mode="auto",
+            max_concurrency=1,
+            max_pending_requests=1,
+            pending_timeout_ms=concurrency.PENDING_TIMEOUT_MS,
+            log_stats_interval_ms=concurrency.STATS_INTERVAL_MS,
+        )
+        validate = lambda: concurrency.validate_server_start(event, point, args)
+    else:
+        args = corpus.parse_args(common)
+        spec = RunSpec(
+            "model",
+            "model",
+            artifact,
+            mode,
+            backend,
+            draft_tokens,
+            "stochastic",
+            args.kv_dtype,
+            Fixture("fixture", [], False, 8, "test"),
+            7,
+        )
+        command = corpus.server_command(
+            Path("serve"), spec, tmp_path / "log", args.port, args.device
+        )
+        validate = lambda: corpus.validate_server_start(event, spec, args.device)
+    assert command[command.index("--kv-dtype") + 1] == kv_dtype
+    assert command[command.index("--context-capacity") + 1] == "auto"
+    assert command[command.index("--host-cache-capacity") + 1] == "0"
+    assert ("--proposal-head" in command) == (head == "optimized")
+    assert validate() == ("instance", "bindings")
+    for field in ("host_capacity_bytes",):
+        engine["context_cache"][field] = 1
+        with pytest.raises(corpus.CampaignError, match="context cache capacity differs"):
+            validate()
+        engine["context_cache"][field] = 0
+    engine["kv_cache"] = "bf16"
+    with pytest.raises(corpus.CampaignError, match="configuration mismatch"):
+        validate()
+
+
+def test_resume_rejects_different_kv_dtype(tmp_path):
+    spec = RunSpec(
+        "model",
+        "model",
+        tmp_path / "model.ninfer",
+        "mtp0",
+        "none",
+        0,
+        "stochastic",
+        "fp8",
+        Fixture("fixture", [], False, 8, "test"),
+        7,
+    )
+    record = {
+        "artifact_type": corpus.RUN_ARTIFACT_TYPE,
+        "schema_version": corpus.RUN_SCHEMA_VERSION,
+        "target": spec.target,
+        "speculative_mode": spec.speculative_mode,
+        "sampling_mode": spec.sampling_mode,
+        "fixture": spec.fixture.name,
+        "seed": spec.seed,
+        "artifact_path": str(spec.artifact),
+        "kv_dtype": "int8",
+    }
+    path = tmp_path / "run.jsonl"
+    path.write_text(json.dumps(record) + "\n")
+    with pytest.raises(corpus.CampaignError, match="KV dtype differs"):
+        corpus.load_existing_records(path, {spec.key: spec})

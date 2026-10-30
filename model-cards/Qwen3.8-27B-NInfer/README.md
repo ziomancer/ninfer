@@ -110,38 +110,46 @@ only for NInfer; it is not a Transformers checkpoint, Safetensors distribution, 
 | Field | Value |
 |---|---|
 | Filename | `qwen3_8_27b.ninfer` |
-| Size | 18,210,531,328 bytes (16.96 GiB) |
-| SHA-256 | `eec39564993d6e9c7d5e383382a760f093465c9d163ec9a1bd6b80199514bf3e` |
-| Container version | 2 |
-| NInfer model ID | `qwen3.8-27b` |
-| NInfer weights ID | `groupwise-int` |
-| NInfer target key | `qwen3_8_27b` |
-| Stored objects | 1,124 (1,118 tensors and 6 resources) |
+| Size | 20,437,521,664 bytes (19.03 GiB) |
+| SHA-256 | `81f924d440c27261d820c19a9f8d45794c5aee410f8a68bd358133fa8c0375da` |
+| Container version | 3 |
+| Architecture | `Qwen3_5ForCausalLM` |
+| Public model name | `qwen3.8-27b` |
+| Chat template | [qwen3_8.jinja](https://github.com/Neroued/ninfer/blob/98dada0e03cb073fd07f905400b5904bc6e82759/tools/chat_templates/qwen3_8.jinja); override with `--chat-template FILE` |
+| Template defaults | thinking on; effort `xhigh`; closed-turn reasoning retained |
+| Stored objects | 1,190 (1,184 tensors and 6 resources) |
 
-The Text body uses the registered Q4/Q5/Q6 groupwise allocation, while the token embedding and
-full output head use `W8G32_F16S`. The file also contains the registered Vision, MTP,
-proposal-head, tokenizer, chat-template, generation, and media-processor objects required by
-NInfer.
+The Text body uses Q4/Q5 projections, while the token embedding and full output head use
+`q8_g32_fp16`. The file also contains Vision, MTP, DFlash2, the optimized proposal head and
+frontend resources. Vision and speculative weights are loaded only when selected at startup.
 
 Verify a downloaded file with:
 
 ```bash
 printf '%s  %s\n' \
-  'eec39564993d6e9c7d5e383382a760f093465c9d163ec9a1bd6b80199514bf3e' \
+  '81f924d440c27261d820c19a9f8d45794c5aee410f8a68bd358133fa8c0375da' \
   'qwen3_8_27b.ninfer' | sha256sum --check
 ```
 
+This release includes the complete DFlash2 companion weights from
+`z-lab/Qwen3.8-27B-DFlash2` at revision
+`50307d4c4cde6860d4eee73e2547cd786fe8e8a4`. Select
+`--spec dflash2 --draft-tokens 7 --proposal-head optimized`; draft counts 1..15 are supported.
+Use the current runtime for DFlash2. Existing performance and evaluation tables
+retain their stated MTP configurations and revisions.
+
 ## Requirements
 
-- [NInfer](https://github.com/Neroued/ninfer) revision
-  [`5232055`](https://github.com/Neroued/ninfer/commit/52320554b5e71a9da96bff809ddf67ac5773ed63)
-  or later, built from source;
+- Current [NInfer](https://github.com/Neroued/ninfer) checkout, built from source;
 - 64-bit Linux;
 - NVIDIA GeForce RTX 5090 (`sm_120a`);
-- CUDA Toolkit 13.1 or newer.
+- Build dependencies from the [build guide](https://github.com/Neroued/ninfer#build).
+
+Already have the official v2 file? [Upgrade it locally](https://github.com/Neroued/ninfer/blob/master/docs/weight-conversion.md#upgrade-an-existing-v2-artifact)
+without downloading the weights again.
 
 NInfer does not provide an install target or packaged binary. See the
-[repository README](https://github.com/Neroued/ninfer#quick-start) for source-build dependencies.
+[repository README](https://github.com/Neroued/ninfer#build) for source-build dependencies.
 
 ## Download and run a CLI example
 
@@ -150,13 +158,13 @@ hf download neroued/Qwen3.8-27B-NInfer \
   qwen3_8_27b.ninfer \
   --local-dir models
 
-./build/apps/ninfer models/qwen3_8_27b.ninfer \
+./build/rtx5090-release/apps/ninfer models/qwen3_8_27b.ninfer \
   --prompt "Explain prefill and decode in three sentences." \
   --max-context 32768 \
-  --max-new 8192 \
+  --max-tokens 8192 \
   --kv-dtype fp8 \
   --spec mtp --draft-tokens 3 \
-  --lm-head-draft
+  --proposal-head optimized
 ```
 
 For images, videos, and structured chat history, see the
@@ -165,28 +173,27 @@ For images, videos, and structured chat history, see the
 ## Start a local server
 
 ```bash
-./build/apps/ninfer-serve models/qwen3_8_27b.ninfer \
+./build/rtx5090-release/apps/ninfer-serve models/qwen3_8_27b.ninfer \
   --host 127.0.0.1 \
   --port 8080 \
   --max-context 240000 \
-  --kv-capacity 240000 \
+  --context-capacity auto \
   --max-concurrency 2 \
   --kv-dtype fp8 \
-  --device-state-slots 2 \
-  --host-state-slots 8 \
-  --host-kv-mib 8192 \
   --spec mtp --draft-tokens 3 \
-  --lm-head-draft \
+  --proposal-head optimized \
   --preserve-thinking
 ```
 
-Each request has a 240,000-token logical ceiling. The shared 240,000-token Device KV pool admits
-two active requests when their combined completion reservations fit; either request may use the
-full pool while running alone. Two extra Device checkpoint slots, eight pinned Host State slots,
-and 8 GiB of pinned Host KV retain reusable continuations under resource pressure.
+Each request has a 240,000-token logical ceiling. KV histories and continuation state share the
+Device Context byte capacity selected at startup. The log reports the pool size and estimated
+token capacity. Requests allocate as they advance; resource pressure can reclaim retained prefixes
+or pause requests for later restoration/replay. See the
+[startup reference](https://github.com/Neroued/ninfer/blob/master/docs/startup-configuration.md)
+for capacity, Host cache and deployment controls.
 
 See the [HTTP serving guide](https://github.com/Neroued/ninfer/blob/master/docs/serving.md) for the
-API surface and the [resource scheduling reference](https://github.com/Neroued/ninfer/blob/master/docs/maintainer/resource-scheduling-and-context-cache.md)
+API surface and the [resource scheduling reference](https://github.com/Neroued/ninfer/blob/master/docs/maintainer/context-management.md)
 for cache and admission semantics.
 
 ## Supported use
@@ -196,7 +203,9 @@ The artifact supports:
 - text generation in thinking and non-thinking modes;
 - image, multi-image, video, and mixed multimodal messages;
 - MTP speculative decoding with draft windows from one to five;
-- row-scaled FP8 E4M3, INT8 group-64, and BF16 KV cache;
+- DFlash2 with draft windows from one to fifteen using the included
+  DFlash2 companion weights (`--spec dflash2 --draft-tokens 7`, optionally `--proposal-head optimized`);
+- BF16, INT8, FP8, NVFP4, and K8V4 KV cache;
 - CUDA Graph decode and compatible-prefix reuse;
 - startup-bounded small-scale concurrent serving with true batched decode;
 - the NInfer CLI;
@@ -231,14 +240,10 @@ card reports no AIME results.
 
 ## Limits
 
-- The artifact is accepted only by NInfer revision `5232055` or later and the matching registered
-  target.
-- NInfer executes on one RTX 5090 and one CUDA device, with a startup-fixed capacity of 1–8 active
-  requests per Engine.
-- It does not provide large-scale or preemptive continuous batching, priority/QoS scheduling,
-  multi-GPU execution, CPU/GPU offload, or distributed serving.
-- Context allocation is subject to GPU memory and the selected KV-cache type.
-- NInfer does not execute generated tool calls.
+- This artifact targets one RTX 5090, with one to eight active requests per Engine.
+- KV and continuation state share the startup Context pool. Usable context depends on the
+  selected KV type, enabled components, concurrency and available memory.
+- NInfer returns generated tool calls to the client; it does not execute them.
 
 ## Provenance
 
@@ -247,10 +252,9 @@ card reports no AIME results.
 | Source repository | `Qwen/Qwen3.8-27B` |
 | Source revision | `1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0` |
 | Download source | `modelscope.cn/models/Qwen/Qwen3.8-27B` |
-| Conversion recipe | `qwen3_8_27b-v1` |
+| Conversion recipe | `qwen3_8_27b` |
 | Converter repository | `https://github.com/Neroued/ninfer` |
-| Converter revision | `52320554b5e71a9da96bff809ddf67ac5773ed63` |
-| Minimum runtime revision | `52320554b5e71a9da96bff809ddf67ac5773ed63` |
+| Minimum runtime revision | `98dada0e03cb073fd07f905400b5904bc6e82759` |
 | Ranking input SHA-256 | `c692dc76388132c910547589b4fb4a0503fbd6ad50aaac6a509bbcb192a8afa5` |
 
 The local source configuration, tensor index, frontend resources, and published CRC32 inventory
@@ -260,7 +264,7 @@ publication.
 The artifact identity, summarized object inventory, and conversion provenance are published in
 [`artifact-manifest.json`](https://huggingface.co/neroued/Qwen3.8-27B-NInfer/blob/main/artifact-manifest.json).
 The exact storage contract is maintained in the
-[Qwen3.8-27B artifact reference](https://github.com/Neroued/ninfer/blob/master/docs/maintainer/qwen3.8-27b-artifact.md).
+[v3 container reference](https://github.com/Neroued/ninfer/blob/master/docs/maintainer/weights-and-loading.md).
 
 ## License
 

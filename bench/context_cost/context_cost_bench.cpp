@@ -1,8 +1,8 @@
 #include "context_cost_measure.h"
-#include "qwen3_6_context_fixture.h"
+#include "model_context_fixture.h"
 
 #include "core/device.h"
-#include "runtime/engine/context_cost.h"
+#include "runtime/engine/context_cache/context_cost.h"
 
 #include <nlohmann/json.hpp>
 
@@ -300,9 +300,9 @@ cost::FitResult fit_prefill(const cost::PrefillSuiteResult& samples) {
         kMaximumPrefillP95, kOrderingSignificance);
 }
 
-std::array<ninfer::runtime::ContextTransferCost, 3>
-runtime_transfer_cost(const std::array<cost::FitResult, 3>& fits) {
-    std::array<ninfer::runtime::ContextTransferCost, 3> result;
+std::array<ninfer::runtime::ContextTransferCost, 4>
+runtime_transfer_cost(const std::array<cost::FitResult, 3>& fits,
+                      std::array<ninfer::runtime::ContextTransferCost, 4> result) {
     for (std::size_t index = 0; index < fits.size(); ++index) {
         const auto& values = fits[index].quantized_coefficients;
         if (values.size() != 3) { throw std::logic_error("incomplete transfer roofline fit"); }
@@ -379,7 +379,7 @@ int main(int argc, char** argv) {
         accepted      = accepted && (!prefill_fit || prefill_fit->accepted);
 
         Json report{
-            {"schema_version", 2},
+            {"schema_version", 3},
             {"artifact_type", "ninfer_context_cost_calibration"},
             {"accepted", accepted},
             {"hardware", Json{{"gpu", hardware.gpu},
@@ -401,9 +401,6 @@ int main(int argc, char** argv) {
         };
         if (artifact) {
             report["artifact"] = Json{{"path", artifact->path.string()},
-                                      {"model_id", artifact->model_id},
-                                      {"weights_id", artifact->weights_id},
-                                      {"target", artifact->target_key},
                                       {"canonical_kv_cache", "bf16"},
                                       {"canonical_speculative_backend", "none"},
                                       {"corpus", options.measurement.corpus.string()}};
@@ -447,9 +444,9 @@ int main(int argc, char** argv) {
             report["prefill"] = Json{
                 {"measurements", std::move(measurements)},
                 {"fit", fit_json(*prefill_fit)},
-                {"load", Json{{"target", prefill_samples->load.target},
-                              {"model_id", prefill_samples->load.model_id},
-                              {"weights_id", prefill_samples->load.weights_id},
+                {"load", Json{{"architecture", prefill_samples->load.architecture},
+                              {"name", prefill_samples->load.model_name},
+                              {"prefill_signature", prefill_samples->load.prefill_signature},
                               {"load_seconds", prefill_samples->load.load_seconds}}},
             };
         }
@@ -474,24 +471,30 @@ int main(int argc, char** argv) {
                 provenance["suite"]                = "transfer";
                 provenance["transfer_warmup"]      = options.measurement.transfer_warmup;
                 provenance["transfer_repetitions"] = options.measurement.transfer_repetitions;
+                provenance["measured_directions"]  = {"d2h", "h2d", "d2d"};
+                const auto existing                = ninfer::runtime::resolve_context_machine_cost(
+                    {hardware_class, {}}, std::filesystem::exists(options.preset_output)
+                                                             ? options.preset_output
+                                                             : std::filesystem::path{});
                 ninfer::runtime::upsert_context_transfer_cost_atomic(
-                    options.preset_output, hardware_class, runtime_transfer_cost(*transfer_fits),
+                    options.preset_output, hardware_class,
+                    runtime_transfer_cost(*transfer_fits, existing.model.transfer),
                     provenance.dump());
             }
             if (prefill_fit) {
                 Json provenance                   = base_provenance;
                 provenance["suite"]               = "prefill";
                 provenance["artifact_path"]       = artifact->path.string();
-                provenance["target"]              = artifact->target_key;
+                provenance["architecture"]        = prefill_samples->load.architecture;
                 provenance["corpus"]              = options.measurement.corpus.string();
                 provenance["prefill_chunk"]       = options.measurement.prefill_chunk;
                 provenance["max_context"]         = options.measurement.max_context;
                 provenance["prefill_repetitions"] = options.measurement.prefill_repetitions;
                 ninfer::runtime::upsert_context_prefill_cost_atomic(
                     options.preset_output,
-                    ninfer::runtime::ContextCostIdentity{.hardware_class = hardware_class,
-                                                         .model_id       = artifact->model_id,
-                                                         .weights_id     = artifact->weights_id},
+                    ninfer::runtime::ContextCostIdentity{
+                        .hardware_class    = hardware_class,
+                        .prefill_signature = prefill_samples->load.prefill_signature},
                     runtime_prefill_cost(*prefill_fit), provenance.dump());
             }
             std::cerr << "wrote preset " << options.preset_output.string() << '\n';

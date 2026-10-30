@@ -1,186 +1,61 @@
-# tools/bench
+# Serve 测量工具
 
-Maintainer orchestration for the public `ninfer_bench` throughput tool and the external Serve TTFT
-client. Correctness is owned by the affected suites under [`tests/`](../../tests/README.md).
+这里提供固定语料的服务测量与外部 TTFT 客户端。细粒度 Engine chunk/step 和 Op 成本使用
+[ninfer_bench 与 Op benches](../../bench/README.md)。这些工具各自保留真实请求和计时边界，
+不从另一层的吞吐推导本层性能。
 
-## External Serve TTFT
+## Serving corpus benchmark
 
-[`ttft/README.md`](ttft/README.md) defines the black-box latency benchmark. The measurement runner
-uses frozen text/media requests and public streaming protocols without calling Engine. A separate
-controller manages the fixed Qwen3.8-27B NVFP4/FP8 Serve profiles and fresh-process isolation.
-
-```bash
-python3 tools/bench/run_serve_ttft_campaign.py --campaign resource --samples 5
-```
-
-The controller chooses the profile, starts and stops Serve for every sample, runs the external
-client, stages the NVFP4 artifact once in `/dev/shm`, stores raw/progress/Serve artifacts below
-`profiles/bench/ttft/`, records structured per-request Serve diagnostics, and writes Markdown,
-JSON, and CSV summaries. The case catalog, exact profiles, TTFT boundary, and fixture qualification
-are documented in the dedicated README.
-
-## Corpus baker
-
-`ninfer_bench` benchmarks prefill at an exact length by slicing the first `P` token ids of a
-committed corpus, so the corpus must be real, in-distribution text (not random tokens) and at
-least as long as the largest prefill you want to run. `make_bench_corpus.py` bakes that corpus
-offline with a local Hugging Face Qwen3.6 tokenizer.
-
-Outputs (committed):
-
-```text
-bench/fixtures/bench_corpus.ids            whitespace-separated decimal token ids (exactly --tokens)
-bench/fixtures/bench_corpus.manifest.json  tokenizer id, token count, and source description
-```
-
-Content sources:
-
-- Built-in curated multi-domain prose (Chinese / English / code / math) — the default. It is
-  encoded WITHOUT the chat template or special tokens, then tiled (paragraphs rotated each cycle)
-  and truncated to exactly `--tokens`. Repetition only fills length; because prefill/decode
-  throughput is token-count / bandwidth bound, it does not bias the numbers.
-- `--source-text <file>` (repeatable) — tokenize your own long meaningful text instead, e.g. a
-  downloaded public-domain book or a concatenated document set, for genuinely diverse very long
-  content. The committed default is `~64k` tokens; raise `--tokens` and/or pass `--source-text`
-  for more.
-
-The binary slices `[0:P]`; the manifest is provenance only.
-
-## Requirements
-
-Install the tokenizer dependencies into the active Python environment:
+[run_serve_corpus.py](run_serve_corpus.py)按固定语料串行请求，显式选择 `LABEL=PATH` artifact、
+Serve executable、backend/mode、sampling 和 KV 表示。它启动服务并保存请求结果、摘要与 server
+日志。准确参数、默认值和结果版本由脚本维护。
 
 ```bash
-pip install -r tools/bench/requirements.txt
+python3 tools/bench/run_serve_corpus.py --help
 ```
 
-The tokenizer is loaded locally only; the tool never downloads from the network. Pass
-`--tokenizer-path` or set `NINFER_TOKENIZER_PATH`.
-
-## Regenerate / check
-
-```bash
-# Regenerate the committed corpus from the built-in bank (default 65536 tokens).
-python3 tools/bench/make_bench_corpus.py \
-  --tokenizer-path /path/to/local/Qwen3.6-27B/tokenizer \
-  --tokens 65536
-
-# Bake from your own downloaded/assembled text instead (kept local; not committed).
-python3 tools/bench/make_bench_corpus.py \
-  --tokenizer-path /path/to/local/Qwen3.6-27B/tokenizer \
-  --tokens 131072 --source-text /path/to/book.txt
-
-# Check that the committed .ids and its descriptive manifest agree; no tokenizer or source needed.
-python3 tools/bench/make_bench_corpus.py --check
-```
-
-`--tokens` is the exact committed corpus size and the ceiling on prefill length; increase it (and
-optionally use `--source-text`) to benchmark longer prefills, memory permitting.
-
-## NInfer performance matrix
-
-`run_ninfer_bench_matrix.py` runs the layered public-Engine `ninfer_bench` matrix against the native
-`.ninfer` artifact and stores its local reports under `profiles/bench/`. Its defaults are:
-
-```text
-artifact: out/qwen3_6_27b.ninfer
-binary:   build/bench/ninfer_bench
-corpus:   bench/fixtures/bench_corpus.ids
-```
-
-The matrix treats MTP `k=3` with the optimized proposal head as the primary path, keeps `k=0` and
-`k=5` as controls, and sweeps `k=0..5` on representative context-decode cases. Decode-bearing cases
-cover CUDA Graph and eager execution; prefill-only cases vary prompt length and prefill chunk.
-
-```bash
-# Configure the benchmark targets once; they are off in the default public build.
-cmake -S . -B build -DNINFER_BUILD_BENCHMARKS=ON
-
-# Inspect commands without running the model.
-python3 tools/bench/run_ninfer_bench_matrix.py --preset core --dry-run
-
-# Main run. Builds build/bench/ninfer_bench first, then writes JSON and summary.csv.
-python3 tools/bench/run_ninfer_bench_matrix.py --preset core
-
-# Longer run that adds 32k/64k prompt and context-decode points.
-python3 tools/bench/run_ninfer_bench_matrix.py --preset full
-
-# Run only the MTP draft-window sweep.
-python3 tools/bench/run_ninfer_bench_matrix.py --preset full --suite mtp_sweep
-```
-
-Default outputs:
-
-```text
-profiles/bench/ninfer-<preset>-<timestamp>/
-  commands.sh
-  manifest.json
-  json/<suite>/<case>.json
-  logs/<suite>.<case>.stderr.txt
-  summary.csv
-  summary.json
-```
-
-Use `--resume` to skip completed JSON reports in an existing `--output-dir`, and `--preset smoke`
-for a minimal script/runner check. `--no-build` uses the binary supplied by `--bench` without
-building it.
-
-Each raw report must be `ninfer_bench_report` schema v13. The flattened summary and schema-v3 matrix
-manifest carry native names from the report: selected target, canonical `weights_id`, artifact,
-load/read/upload/staging values, Engine memory arenas including the non-additive Vision layout
-inside the unified workspace and CUDA Graph allowance, per-test planned logical and
-allocator-observed workspace peaks, KV capacity and
-payload, configured proposal head and graph mode, phase timings and throughput, and speculative
-rounds/drafts/acceptance/fallbacks. The matrix manifest is descriptive and records the commands and
-selected local inputs; it does not make repository state part of report validity.
-
-`run_serve_corpus.py` runs both registered targets and both published MTP0/MTP3 suites when both
-artifacts are supplied. Pass one `--artifact` to select a single target and `--mode mtp0` or
-`--mode mtp3` to run only that suite. The 35B-A3B-only `--mode dflash7` route runs the same
-decode corpus with DFlash block=8 (`k=7`) and the optimized proposal head. Add
-`--sampling greedy` to force exact argmax while retaining the same fixtures and repetition count.
-Its schema-v6 result and flattened summaries retain the canonical `weights_id`, request Host
-exposure, and decode Host/Device-wait time per round received from the schema-v18 serving records.
-Request exposure is a latency distribution value and is never summed across concurrent requests;
-worker aggregation uses the serving `throughput.host_work` interval deltas. The stochastic route pins its complete
-temperature/top-p/top-k/min-p/presence/frequency profile explicitly, so model-default changes do
-not alter the measurement method.
+报告直接消费生产日志的 server TTFT。Vision stream 时间结合样本数解释，未测量不能写成零。
+Host exposure 是请求时延分量，不跨并发直接累加为 worker 工作量。
+公开比较的语料与汇总规则见[服务测量方法](../../docs/performance/methodology.md)。
 
 ## Concurrent serving benchmark
 
-`run_serve_concurrency.py` measures two separate concurrency properties through real loopback
-Chat Completions requests:
-
-- `decode-saturation` submits one long-decode wave and uses only complete one-second intervals in
-  which every decode round has exactly the configured batch size. Ramp-up, prefill, and drain
-  intervals are excluded.
-- `corpus-makespan` shuffles the existing mode-specific corpus once with the fixed seed `20260811`,
-  then runs that same order with exactly `N` persistent client workers. A worker submits the next
-  request only after its current response completes, and makespan ends when the final response has
-  been read. Request bodies are sent in shuffled-order sequence while response waits remain fully
-  concurrent, removing client-thread arrival races without serializing inference.
-
-Each concurrency point starts a fresh server because its execution graphs and memory plan are
-startup-fixed. Prefix reuse is disabled, startup and warmup are outside both measurements, and the
-runner writes per-point JSON, raw serving JSONL, and combined JSON/CSV/Markdown summaries.
-The point report records the shuffle seed, dispatch method, shuffled position, and canonical corpus
-position for every request.
+[run_serve_concurrency.py](run_serve_concurrency.py)提供 `decode-saturation` 与 `corpus-makespan`。
+每个并发点建立对应服务实例；并发、context、chunk、KV 和 proposal head 明确记录。
+资源报告保留各 rank 与总量，缺少启动观测明确标记 unavailable。
 
 ```bash
 python3 tools/bench/run_serve_concurrency.py \
-  --artifact qwen3_6_27b=out/qwen3_6_27b_nvfp4.ninfer \
-  --mode mtp3 --suite decode-saturation \
-  --concurrency 1 --concurrency 2 --concurrency 4 \
-  --decode-tokens 8192 \
-  --output profiles/bench/concurrent-decode
-
-python3 tools/bench/run_serve_concurrency.py \
-  --artifact qwen3_6_27b=out/qwen3_6_27b_nvfp4.ninfer \
-  --mode mtp3 --suite corpus-makespan \
-  --concurrency 1 --concurrency 2 \
-  --output profiles/bench/concurrent-corpus
+  --serve build/rtx5090-dev/apps/ninfer-serve \
+  --artifact model=/explicit/model.ninfer --kv-dtype fp8 \
+  --mode mtp3 --suite corpus-makespan --concurrency 1 --concurrency 4 \
+  --output .agent-tmp/serve-bench/corpus
 ```
 
-Use `--kv-capacity auto` when the fixed corpus needs more shared KV than the default 262,144-token
-pool. A point is intentionally not resumable: combining fragments from separate server processes
-would not preserve either a steady interval or one continuous makespan.
+两种 suite 的工作量和时间边界不同，报告使用实际完成输出及请求 outcome。
+语料会影响 expert 激活与 speculative 接受情况；重复文本不能未经测量就声称不影响结果。
+
+## External Serve TTFT
+
+[TTFT 说明](ttft/README.md)定义公开 HTTP 的首输出、stream gap、取消与缓存诊断。
+Runner 使用冻结语料，campaign controller 负责配置服务和逐 sample 的隔离：
+
+```bash
+python3 tools/bench/run_serve_ttft_campaign.py \
+  --serve build/rtx5090-dev/apps/ninfer-serve \
+  --artifact /explicit/model.ninfer --campaign resource --samples 1
+```
+
+单 sample 说明该次轨迹，不建立分布结论。机制未观测到、数据不可用、请求失败与时延较高分别报告。
+
+## Token corpus 工具
+
+[make_bench_corpus.py](make_bench_corpus.py)为需要 token-ID fixture 的测试或实验离线生成语料，
+使用显式本地 tokenizer。它不再是 `ninfer_bench` 的输入接口；后者使用 prompt/messages。
+
+```bash
+python3 tools/bench/make_bench_corpus.py --check
+```
+
+重建时按 `--help` 指定 tokenizer、源文本与输出路径。临时数据、请求结果、trace 和性能报告
+统一放在 `.agent-tmp/<task>/`。

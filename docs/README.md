@@ -7,58 +7,52 @@ run the CLI or HTTP server.
 
 | Document | Purpose |
 |---|---|
+| [Startup configuration](startup-configuration.md) | shared CLI/serve TOML schema, defaults, overrides, resource controls and startup display |
+| [Deployment configurations](../examples/configs/) | RTX 5090, single Spark and dual-Spark TOML examples |
 | [CLI](cli.md) | text, chat-history, image/video input, output streams, sampling, MTP, and common runtime options |
 | [HTTP serving](serving.md) | OpenAI Responses/Chat Completions, Anthropic Messages, state, streaming, token counting, authentication, and tool calls |
-| [Performance](performance.md) | RTX 5090 single-request and concurrent-decode results, MTP/DFlash measurements, and reproduction commands |
+| [Performance](performance.md) | RTX 5090 measurement coverage, per-model serving results, methodology, and publication rules |
+| [Weight conversion](weight-conversion.md) | official recipes, custom formats and sources, conversion methods, optional components and artifact output |
 | [Perplexity](perplexity.md) | fixed-corpus and custom-text causal perplexity, comparison rules, progress, and reports |
 | [CLI examples](../examples/cli/) | committed text, multimodal, thinking, long-decode, and long-context inputs |
 
 The executable `--help` output is the exact source for command-line option spelling and defaults.
 
-## Model artifacts
+Published artifact downloads are listed in the [project README](../README.md).
+[Versioned model cards](../model-cards/) own each artifact's identity, provenance and evaluation results.
 
-| Model | Weights | Download | Versioned model card source |
-|---|---|---|---|
-| Qwen3.6-27B | `groupwise-int` | [Hugging Face](https://huggingface.co/neroued/Qwen3.6-27B-NInfer) | [model card](../model-cards/Qwen3.6-27B-NInfer/README.md) |
-| Qwen3.6-27B | `nvfp4` | [Hugging Face](https://huggingface.co/neroued/Qwen3.6-27B-nvfp4-NInfer) | [model card](../model-cards/Qwen3.6-27B-nvfp4-NInfer/README.md) |
-| Qwen3.8-27B | `groupwise-int` | [Hugging Face](https://huggingface.co/neroued/Qwen3.8-27B-NInfer) | [model card](../model-cards/Qwen3.8-27B-NInfer/README.md) |
-| Qwen3.8-27B | `nvfp4` | [Hugging Face](https://huggingface.co/neroued/Qwen3.8-27B-nvfp4-NInfer) | [model card](../model-cards/Qwen3.8-27B-nvfp4-NInfer/README.md) |
-| Qwen3.6-35B-A3B | `groupwise-int` | [Hugging Face](https://huggingface.co/neroued/Qwen3.6-35B-A3B-NInfer) | [model card](../model-cards/Qwen3.6-35B-A3B-NInfer/README.md) |
+## Internal architecture
 
-## Repository-local guides
+内部文档记录跨模块设计、重要数值取舍和开发方法。具体类型、接口、支持几何与 codec
+以所属代码为准，不在文档维护重复声明。
 
-- [Benchmarks](../bench/README.md)
-- [Tests](../tests/README.md)
-- [Maintainer tools](../tools/README.md)
-- [Capability evaluation](../eval/README.md)
+| Document | Responsibility |
+|---|---|
+| [Engine architecture](maintainer/engine-architecture.md) | 所有权、启动预算、请求与执行事务、提交和退役 |
+| [Distributed execution](maintainer/distributed-execution.md) | 集中调度、rank 准备、控制与数据通信、完整完成与失败 |
+| [Context management](maintainer/context-management.md) | KV/State 统一容量、身份、预留、前缀策略、ADP 与恢复 |
+| [Frontend](maintainer/frontend.md) | 模型策略与共享文本/媒体基础、输入身份、输出与 grammar 事务 |
+| [Weights and loading](maintainer/weights-and-loading.md) | 表示、绑定、转换、保值分片物化与 backing |
+| [Qwen3.5](maintainer/qwen3_5-model.md) | Dense/MoE、Main/MTP/DFlash、Vision 与状态组合 |
+| [Qwen4Exp](maintainer/qwen4_exp-model.md) | Flash Next、HC/QSA/PLE、量化、TP/EP 与执行组合 |
+| [GLM5Next](maintainer/glm5next-model.md) | KDA/MLA/mHC、量化、ADP、MTP/Vision 与 Graph |
+| [Speculative execution](maintainer/speculative-decoding.md) | MTP 对齐、ReplaySSM、DFlash 分布与接受前缀 |
+| [Expert cache](maintainer/expert-weight-cache.md) | 固定与流式缓存、CPU/GPU 分工、上传和消费寿命 |
+| [Observability](maintainer/observability.md) | 时间和资源口径、测量窗口、rank 统计与日志边界 |
+| [Op development](maintainer/op-development.md) | 语义、实现组织、数值验证与调优方法 |
+| [Build system](maintainer/build-system.md) | Target、编译与链接、源码和依赖归属 |
 
-## Maintainer references
+## Development tools
 
-The active references under [`maintainer/`](maintainer/) record current architecture, model,
-artifact, and maintenance contracts. These files are not additional user workflows or installed
-API documentation.
+- [Tests](../tests/README.md)：测试组织、筛选与真实模型检查。
+- [Benchmarks](../bench/README.md)：Engine/Op 微测、roofline 与外部 profiling。
+- [Tools](../tools/README.md)：转换检查、Serve runners 与带宽工具入口。
+- [Capability evaluation](../eval/README.md)：API 评测、并发与结果恢复。
 
-Runtime and Op references:
+## Open work
 
-- [Engine architecture, execution ownership, scheduling, and request lifecycles](maintainer/engine-architecture.md)
-- [Resource scheduling, continuation/checkpoint, and Device/Host context-cache contracts](maintainer/resource-scheduling-and-context-cache.md)
-- [Paged KV context storage, ownership, and capacity model](maintainer/paged-kv-cache.md)
-- [Op admission, contracts, ownership, qualification, and performance rules](maintainer/op-development.md)
-- [ReplaySSM GDN technical reference](maintainer/replayssm-gdn.md)
-- [Linear benchmark contract and registered suites](maintainer/linear-benchmark.md)
+[未完成事项](issue-checklist.md)保留待处理问题与 MLA 性能工作。
+Qwen4-27B 的[架构与量化](designs/qwen4-27b-rtx5090.md)及
+[Op 需求](designs/qwen4-27b-op-checklist.md)属于独立适配计划。
 
-`engine-architecture.md` is the sole top-level Engine architecture reference.
-`resource-scheduling-and-context-cache.md` is its narrower authority for resource selection,
-materialization, checkpoint ownership, and replica policy. The remaining files define physical
-storage, model, artifact, Op, or measurement contracts rather than parallel architecture variants.
-
-Artifact and model references:
-
-- [NInfer artifact container](maintainer/artifact-container.md)
-- [Persistent tensor numeric formats](maintainer/tensor-formats.md)
-- [Persistent storage layouts](maintainer/storage-layouts.md)
-- [Qwen3.6-27B model semantics](maintainer/qwen3.6-27b-model.md)
-- [Qwen3.6-27B artifact contracts, including NVFP4](maintainer/qwen3.6-27b-artifact.md)
-- [Qwen3.8-27B artifact contracts, including the NVFP4 target](maintainer/qwen3.8-27b-artifact.md)
-- [Qwen3.6-35B-A3B model semantics](maintainer/qwen3.6-35b-a3b-model.md)
-- [Qwen3.6-35B-A3B artifact contracts](maintainer/qwen3.6-35b-a3b-artifact.md)
+Qwen3.8-Flash-Next 使用 Qwen4Exp；Qwen3.8-27B 使用 Qwen3.5。

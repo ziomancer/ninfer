@@ -1,20 +1,12 @@
-#include <iostream>
+#include "causal/fixture.h"
 
-int run_softmax_attention_causal_cache_tests();
-int run_softmax_attention_plain_and_packed_tests();
-int run_softmax_attention_context_tests();
+void add_plain_attention_cases(ninfer::test::OpSuite&);
+void add_context_attention_cases(ninfer::test::OpSuite&);
 
-int main() {
-    const int causal = run_softmax_attention_causal_cache_tests();
-    if (causal == 77) return 77;
-
-    const int plain_and_packed = run_softmax_attention_plain_and_packed_tests();
-    if (plain_and_packed == 77) return 77;
-
-    const int context = run_softmax_attention_context_tests();
-    if (context == 77) return 77;
-
-    const int failures = causal + plain_and_packed + context;
-    std::cout << (failures == 0 ? "softmax_attention: PASS\n" : "softmax_attention: FAIL\n");
-    return failures == 0 ? 0 : 1;
+int main(int argc, char** argv) {
+    ninfer::test::OpSuite suite;
+    ninfer::test::causal_attention::add_cases(suite);
+    add_plain_attention_cases(suite);
+    add_context_attention_cases(suite);
+    return suite.main(argc, argv);
 }
