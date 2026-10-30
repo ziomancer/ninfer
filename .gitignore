@@ -65,5 +65,7 @@ profiles/
 
 # Vigil Harbor ops overlay (vigil-deploy branch)
 .env
+.env.*
+!.env.example
 /.claude/
 /.agents/

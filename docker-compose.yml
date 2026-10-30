@@ -14,9 +14,13 @@
 # Studio's qwen3.8-27b GGUF is 17.7 GiB. Both at once does not fit. Freeing VRAM
 # by stopping LM Studio is an operator gate, per ninfer-spike/SPIKE-root.md.
 
+# Fixed project name: container_name below is global, so every checkout of this
+# file must act on the same project or `down` can miss a container another one made.
+name: ninfer
+
 services:
   chat-model:
-    image: ninfer:local
+    image: ${NINFER_IMAGE:-ninfer:local}
     container_name: vigil-chat-model
     restart: unless-stopped
 
