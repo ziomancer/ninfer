@@ -34,6 +34,7 @@ services:
     # --context-capacity is set explicitly in .env. `auto` would plan the pool up to the
     # usable VRAM budget, and later GPU users such as the embedders would then compete.
     # --no-preserve-thinking and --no-vision state the serving behaviour we rely on.
+    # --thinking-budget caps model reasoning, so a spiral cannot spend the whole output budget.
     entrypoint: ["ninfer-serve"]
     command: >
       /models/${NINFER_ARTIFACT:-qwen3_8_27b.ninfer}
@@ -50,6 +51,7 @@ services:
       --draft-tokens ${NINFER_DRAFT_TOKENS:-3}
       --proposal-head optimized
       --no-preserve-thinking
+      --thinking-budget ${NINFER_THINKING_BUDGET:-20000}
       --no-vision
       --kv-dtype ${NINFER_KV_DTYPE:-bf16}
       --request-log-jsonl /logs/requests.jsonl
