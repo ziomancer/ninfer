@@ -264,3 +264,20 @@ not quality.
 
 Also worth knowing, from the live log: Hermes sends `tool_count: 45`,
 `requested_output_tokens: 32768`, and a ~24.8k-token prompt with `enable_thinking: true`.
+
+## Engine migration, upstream 1882c6ad (2026-10-30)
+
+`bench/bench.sh`, 512-token generations with thinking off, nvfp4, 6 GiB context capacity. Decode is
+`(completion_tokens - 1) / timings_seconds.decode`. Each arm is 20 samples except the old engine (10).
+
+| Engine | KV | Draft | Mean tok/s | sd | Acceptance |
+|---|---|---|---:|---:|---:|
+| Aug 21 image | int8 | 4 | 159.2 | 4.1 | 49.1% |
+| 1882c6ad | int8 | 4 | 154.3 | 9.1 | 48.0% |
+| 1882c6ad | int8 | 4 (repeat) | 160.8 | 7.3 | 48.8% |
+| 1882c6ad | int8 | 3 | 156.5 | 7.0 | 56.8% |
+| 1882c6ad | fp8 | 4 | 158.7 | 8.9 | 48.0% |
+| 1882c6ad | fp8 | 3 | 159.2 | 6.3 | 57.3% |
+
+The repeat spread on one config (6.5 tok/s) is as large as any gap between arms, so nothing beat the
+existing int8 / draft 4 setup and it stays.

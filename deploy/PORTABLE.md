@@ -12,8 +12,8 @@ What travels to the target:
 
 | Piece | How it travels |
 |---|---|
-| `ninfer:local` Docker image (4.67 GB) | `docker save` tar in the bundle (`Make-Bundle.ps1`) — preferred; bit-identical to the validated engine |
-| Model artifact (17–20 GiB) | **Not** in the bundle by default — download from HuggingFace on the target and hash-verify (step 2) |
+| `ninfer:local` Docker image (4.69 GB) | `docker save` tar in the bundle (`Make-Bundle.ps1`) — preferred; bit-identical to the validated engine |
+| Model artifact (17–20 GiB) | In the bundle with `-IncludeArtifacts nvfp4` — preferred; these are the validated bytes (step 2) |
 | Repo files (compose, VH-Model.ps1, bench, watchdog, this runbook) | In the bundle |
 | `.env` | Never travels — created per-host from `.env.example` (step 3) |
 | Hermes config change | Two lines, edited by hand with a backup (step 6) |
@@ -24,7 +24,7 @@ What travels to the target:
 
 **GPU.** The target is the same build as the origin — a single RTX 5090 (32,607
 MiB), exactly what NInfer targets — so the origin's final config (nvfp4, MTP
-dt=4, int8 KV, 128k context) carries over unchanged. Confirm, and grab the UUID
+dt=4, int8 KV, 128k context, 6 GiB context capacity) carries over unchanged. Confirm, and grab the UUID
 for `.env` while you're here:
 
 ```
@@ -55,35 +55,37 @@ PS 5.1 zip mishandles >4 GiB entries). On the target:
 
 ```
 docker load -i ninfer-image.tar
-docker image ls ninfer:local        # expect a4764664cf8b, built 2026-08-21
+docker image ls ninfer:local        # expect acd5a0174f82, built 2026-10-30 from upstream 1882c6ad
 ```
 
-Fallback only: rebuild from source (`github.com/Neroued/ninfer`, Dockerfile in
-repo root). Upstream has **no tagged releases**, so a rebuild today is not the
-engine that was validated — if you rebuild, re-run the full smoke of step 5.
+Fallback only: rebuild from the `vigil-deploy` branch of `github.com/ziomancer/ninfer`:
+`git -c core.autocrlf=false archive HEAD | docker build --pull -t ninfer:local -`. Archiving
+keeps LF line endings out of Windows' reach. If you rebuild, re-run the full smoke of step 5.
+Sanity-check GPU access with `--gpus all`; without it the binaries cannot load `libcuda.so.1`.
 
 Sanity: `docker run --rm --runtime nvidia --gpus all --entrypoint nvidia-smi ninfer:local`
 must show the target's GPU.
 
 ## 2. Model artifact
 
-Download on the target (needs the `hf` CLI, no auth required). nvfp4 is what
-serves; groupwise-int is optional — only worth the 17 GiB if you want the
-`VH-Model.ps1 artifact groupwise` fallback available offline:
+The engine reads only v3 artifacts. Copy the validated v3 file from the bundle into
+`%USERPROFILE%\.ninfer\models`. nvfp4 is what serves; groupwise-int is optional, only worth the
+17 GiB if you want the `VH-Model.ps1 artifact groupwise` fallback.
 
-```
-# nvfp4 — the serving artifact (20 GiB)
-hf download neroued/Qwen3.8-27B-nvfp4-NInfer qwen3_8_27b_nvfp4.ninfer --local-dir %USERPROFILE%\.ninfer\models
-# groupwise-int — optional fallback (17 GiB)
-hf download neroued/Qwen3.8-27B-NInfer qwen3_8_27b.ninfer --local-dir %USERPROFILE%\.ninfer\models
-```
+Do not substitute a HuggingFace download without re-validating. Those files are also v3 but are
+different artifacts (nvfp4 is 23.7 GB against 21.5 GB here) and have not been benchmarked on this
+stack.
 
-Verify — a truncated download presents as a crash loop, not a checksum error:
+If the target already holds the older v2 files, upgrade them instead of transferring. Run under
+WSL, because the tool uses POSIX-only file calls, with the output in a new directory:
+`python3 tools/upgrade_ninfer_v2_to_v3.py <v2 file> <v3 file>`.
+
+Verify — a truncated copy presents as a crash loop, not a checksum error:
 
 | Artifact | Bytes (exact) | SHA-256 |
 |---|---|---|
-| `qwen3_8_27b_nvfp4.ninfer` | 21,492,695,040 | `bb3360522a06e136e0367f5703414d26272b7285c8a6ab6194135c17dbd81b32` |
-| `qwen3_8_27b.ninfer` | 18,210,531,328 | `eec39564993d6e9c7d5e383382a760f093465c9d163ec9a1bd6b80199514bf3e` |
+| `qwen3_8_27b_nvfp4.ninfer` | 21,492,938,224 | `31c99b74582f1292f80c0bfd1e5f63f4b4a1a1d8731d8c71be78dca1f46eeed6` |
+| `qwen3_8_27b.ninfer` | 18,210,749,936 | `da624891f1ac24733d9169781fb78fc10fe30b85edfe91b60b122101cef87946` |
 
 ```
 Get-FileHash $env:USERPROFILE\.ninfer\models\<file> -Algorithm SHA256
@@ -123,8 +125,8 @@ race NInfer for VRAM and one of them fails to load.
 Then three checks, all required:
 
 1. `curl http://127.0.0.1:3400/v1/models` → id `qwen/qwen3.8-27b`.
-2. `docker logs vigil-chat-model | findstr "KV capacity"` → `pages=N/N` equal.
-   If N<M, VRAM was short and `--kv-capacity auto` silently downsized the cache.
+2. `docker logs vigil-chat-model | findstr "context"` → `device 6.00 GiB` and `KV ~N tokens`
+   with N at least 131072 (about 163k is expected). `nvidia-smi` should show 3.2–4.0 GiB free.
 3. **Tool-call smoke** — the thing Hermes actually depends on; a plain completion
    proves very little (bash, key from `.env`):
 
@@ -142,7 +144,7 @@ Expect a `tool_calls` entry naming `get_weather`. Prose instead → **stop**; He
 will misbehave in ways that look like agent bugs.
 
 While you're here, sanity-check throughput: `.\VH-Model.ps1 status` should show
-decode in the ~180 tok/s neighborhood the origin 5090 measured. Dramatically
+decode in the ~155–160 tok/s neighborhood the origin 5090 measured with `bench\bench.sh`. Dramatically
 lower on identical hardware means another VRAM tenant (see step 7).
 
 ## 6. Repoint Hermes
@@ -187,8 +189,8 @@ profiles, scripts) and repoint them to 3400 (chat) / their real embedding endpoi
   (from Git Bash; reads `../.env`) verifies in ~5 minutes. The sweep only becomes
   mandatory again if the **artifact** changes — optima do not transfer between
   artifacts (nvfp4 → 4; groupwise → 2..4 flat, 5 strictly worse).
-- Grow context with `.\VH-Model.ps1 context <n>`; it reprints the KV line —
-  insist on `pages=N/N`.
+- Grow context with `.\VH-Model.ps1 context <n>`; it reprints the context line. Raise
+  `NINFER_CONTEXT_CAPACITY` too if the `KV ~N tokens` estimate falls below the new limit.
 - Watchdog: `.\VH-Model.ps1 health` (`tools/check-collapse.sh`). It reads
   `logs/requests.jsonl`, which is append-only and never rotated — prune manually.
 - Loading/evicting without a shell: **double-click `VH-Model-Toggle.cmd`** (ships in

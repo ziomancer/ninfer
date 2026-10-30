@@ -2,3 +2,5 @@
 # default whitespace checks.
 /third_party/spdlog/include/** -whitespace
 /third_party/spdlog/src/** -whitespace
+# Bash breaks on CRLF, and Git for Windows defaults to autocrlf=true.
+*.sh text eol=lf

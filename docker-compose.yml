@@ -31,7 +31,9 @@ services:
     #
     # --max-context 32768 matches what Start-VHStack.ps1 asked LM Studio to load,
     # so context behaviour does not silently change across the cutover.
-    # --kv-capacity auto leaves 1024 MiB of sizing headroom (per --help).
+    # --context-capacity is set explicitly in .env. `auto` would plan the pool up to the
+    # usable VRAM budget, and later GPU users such as the embedders would then compete.
+    # --no-preserve-thinking and --no-vision state the serving behaviour we rely on.
     entrypoint: ["ninfer-serve"]
     command: >
       /models/${NINFER_ARTIFACT:-qwen3_8_27b.ninfer}
@@ -39,21 +41,23 @@ services:
       --port 3400
       --model-id qwen/qwen3.8-27b
       --max-context ${NINFER_MAX_CONTEXT:-32768}
-      --kv-capacity auto
+      --context-capacity ${NINFER_CONTEXT_CAPACITY:-auto}
       --max-concurrency ${NINFER_MAX_CONCURRENCY:-2}
       --api-key ${NINFER_API_KEY:?set NINFER_API_KEY in ninfer/.env}
-      --log-stats-interval-ms 0
+      --stats-interval 0ms
+      --pending-timeout ${NINFER_PENDING_TIMEOUT:-600s}
       --spec ${NINFER_SPEC:-mtp}
       --draft-tokens ${NINFER_DRAFT_TOKENS:-3}
-      --lm-head-draft
+      --proposal-head optimized
+      --no-preserve-thinking
+      --no-vision
       --kv-dtype ${NINFER_KV_DTYPE:-bf16}
       --request-log-jsonl /logs/requests.jsonl
-      --default-max-tokens ${NINFER_DEFAULT_MAX_TOKENS:-8192}
+      --max-tokens ${NINFER_DEFAULT_MAX_TOKENS:-8192}
 
-    # Speculative decoding. MTP is the ONLY backend available for this model —
-    # docs/serving.md:38 states DFlash is 35B-A3B text-only, so `--spec dflash` here
-    # would be a load error, not a slower path. --draft-tokens is capped at 5 for MTP
-    # (1..15 is the DFlash range). --lm-head-draft loads the optimized proposal head.
+    # Speculative decoding. MTP is the backend here: DFlash2 needs companion weights this
+    # deployment does not have, and DFlash is 35B-A3B only. --draft-tokens is capped at 5
+    # for MTP. --proposal-head optimized loads the optimized proposal head.
     #
     # Residency is FROZEN AT STARTUP by --spec/--draft-tokens: changing either is a
     # restart and a VRAM re-plan, not a runtime knob.

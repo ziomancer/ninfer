@@ -3,8 +3,8 @@
 # INT8 group-64 KV). Watches for the failure modes that matter: the model getting
 # stuck in cycles, or degrading into junk.
 #
-# IMPORTANT LIMITATION: NInfer's request log records METADATA ONLY -- schema_version 10
-# has no response text (verified against a live record). So this cannot detect
+# IMPORTANT LIMITATION: NInfer's request log records METADATA ONLY -- it has no response
+# text (verified against a live schema 10 record). So this cannot detect
 # repetition directly. It infers looping from the strongest available proxy: requests
 # that run to their full output budget. Nothing here inspects a single token of output.
 #

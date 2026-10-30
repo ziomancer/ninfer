@@ -191,6 +191,26 @@ is absent by construction rather than fixed.
 
 ---
 
+## Engine migration to upstream `1882c6ad` (2026-10-30)
+
+Moved from the Aug 21 image to upstream master, with v3 artifacts upgraded from the v2 files
+(`%USERPROFILE%\.ninfer\models-v3`). Same model, alias, int8 KV, and draft tokens.
+
+Flag changes: `--kv-capacity auto` → `--context-capacity 6GiB`, `--lm-head-draft` →
+`--proposal-head optimized`, `--log-stats-interval-ms 0` → `--stats-interval 0ms`,
+`--default-max-tokens` → `--max-tokens`. New: `--no-preserve-thinking` (the default changed),
+`--no-vision`, and `--pending-timeout 600s`, because 290 requests had expired at the 30s default.
+
+- **Context capacity must stay explicit.** `auto` took the pool to 9.75 GiB and left 687 MiB free.
+  6 GiB estimates ~163k KV tokens, leaving 4.0 GiB free, or 3.2 GiB after an embedder restart.
+- **Decode held:** 159.2 tok/s before, 154.3 and 160.8 after (`bench/RESULTS.md`). The old 181 tok/s
+  figure was not reproduced by the old engine on this date either, so it is not a regression.
+- Verified: tool calls (streaming too), a 100,050-token prompt with prefix reuse on repeat, a request
+  queued 50 s, a Hermes multi-tool conversation, and the embedder staying on the GPU after a restart.
+- **Not verified:** the embedding parity gate was not re-run.
+
+---
+
 ## Operator control -- no agent required
 
 `VH-Model.ps1` in this directory. Verbs:
@@ -217,9 +237,8 @@ Two things the script deliberately does:
 - **It never touches Hermes' config.** Stopping the engine does not repoint Hermes -- Hermes
   simply cannot reach a model until you start it again. That keeps the two concerns
   separate, so an eviction is never a config migration.
-- **`context` re-reads the KV line after reload and tells you to check `pages=N/N`.** If VRAM
-  is short, `--kv-capacity auto` silently resolves *fewer* pages instead of refusing to
-  start, so you would quietly get less context than you asked for.
+- **`context` re-reads the context line after reload** and tells you to check that `KV ~N tokens`
+  covers the new limit. `max-context` is only a limit; the pool is `NINFER_CONTEXT_CAPACITY`.
 
 ---
 

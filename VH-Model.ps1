@@ -65,6 +65,21 @@ function Show-Vram {
     if ($q) { Write-Host ("  VRAM        : " + ($q -join "")) }
 }
 
+# Decode from the engine's request log: (completion_tokens - 1) / decode seconds, the
+# same formula as bench/bench.sh. The human log line uses a different denominator.
+function Get-RecentDecode([int]$Take = 10) {
+    $log = Join-Path $Dir "logs\requests.jsonl"
+    if (-not (Test-Path -LiteralPath $log)) { return @() }
+    $rates = foreach ($line in (Get-Content -LiteralPath $log -Tail 400)) {
+        if ($line -notmatch '"event":"request_done"') { continue }
+        try { $r = $line | ConvertFrom-Json } catch { continue }
+        $gen = [double]$r.result.completion_tokens
+        $sec = [double]$r.timings_seconds.decode
+        if ($gen -gt 50 -and $sec -gt 0.5) { ($gen - 1) / $sec }
+    }
+    return @($rates) | Select-Object -Last $Take
+}
+
 function Wait-Serving([int]$TimeoutSec = 360) {
     # Cold-loading ~19 GiB of weights into VRAM takes ~70 s; allow generously.
     Write-Host "  waiting for the model to load ..." -NoNewline
@@ -75,8 +90,9 @@ function Wait-Serving([int]$TimeoutSec = 360) {
             Write-Host ""
             Write-Host "  CRASH LOOP. Last log lines:" -ForegroundColor Red
             docker logs --tail 12 $Container 2>&1 | ForEach-Object { Write-Host "    $_" }
-            Write-Host "  Most likely: the artifact named by NINFER_ARTIFACT is missing, or" -ForegroundColor Yellow
-            Write-Host "  something else on the GPU is holding the VRAM it needs." -ForegroundColor Yellow
+            Write-Host "  Most likely: the artifact named by NINFER_ARTIFACT is missing or still v2" -ForegroundColor Yellow
+            Write-Host "  (the log names the upgrade tool), or something else on the GPU is holding" -ForegroundColor Yellow
+            Write-Host "  the VRAM it needs." -ForegroundColor Yellow
             return $false
         }
         Start-Sleep -Seconds 5
@@ -124,15 +140,12 @@ switch ($Action.ToLower()) {
     Write-Host ("  Context     : " + (Get-EnvVal "NINFER_MAX_CONTEXT" "?") + " tokens x " + (Get-EnvVal "NINFER_MAX_CONCURRENCY" "?") + " slot(s)")
     Write-Host ("  Speculative : mtp, draft-tokens " + (Get-EnvVal "NINFER_DRAFT_TOKENS" "?"))
     Write-Host ("  KV dtype    : " + (Get-EnvVal "NINFER_KV_DTYPE" "bf16"))
+    Write-Host ("  Capacity    : " + (Get-EnvVal "NINFER_CONTEXT_CAPACITY" "auto") + " (device, KV + state)")
     Write-Host ("  Endpoint    : http://127.0.0.1:" + (Get-Port) + "/v1")
     Show-Vram
     if ($serving) {
-      # Recent decode rates straight from the engine's own counter, not wall clock.
-      $rates = docker logs --tail 400 $Container 2>&1 |
-               Select-String -Pattern 'decode=([0-9.]+)tok/s' -AllMatches |
-               ForEach-Object { $_.Matches } | ForEach-Object { [double]$_.Groups[1].Value }
-      if ($rates -and @($rates).Count -gt 0) {
-        $last = @($rates) | Select-Object -Last 10
+      $last = @(Get-RecentDecode)
+      if ($last.Count -gt 0) {
         $avg  = ($last | Measure-Object -Average).Average
         Write-Host ("  Decode      : {0:N1} tok/s (mean of last {1} requests)" -f $avg, @($last).Count)
       }
@@ -190,9 +203,8 @@ switch ($Action.ToLower()) {
   "context" {
     if (-not $Value) {
       Write-Host "Usage: .\VH-Model.ps1 context <tokens>    e.g. 131072" -ForegroundColor Red
-      Write-Host "Measured on this host (nvfp4, 1 slot): decode is FLAT across context length,"
-      Write-Host "so this is a VRAM decision only. With int8 KV: 128k leaves ~4.0 GiB free,"
-      Write-Host "192k leaves ~1.8 GiB. With bf16 KV, 128k leaves only ~0.3 GiB -- avoid."
+      Write-Host "This sets the per-request limit. Physical memory is NINFER_CONTEXT_CAPACITY in .env;"
+      Write-Host "raise that too if the reprinted KV estimate falls below the new limit."
       exit 1
     }
     Write-Host ("Setting max-context to " + $Value + " and reloading ...") -ForegroundColor Cyan
@@ -200,15 +212,14 @@ switch ($Action.ToLower()) {
     Invoke-Compose @("up","-d")
     if (Wait-Serving) {
       Show-Vram
-      # The failure mode to catch: if VRAM is short, --kv-capacity auto resolves FEWER
-      # pages instead of refusing to start, so you silently get less context than asked.
-      $kv = docker logs $Container 2>&1 | Select-String -Pattern "KV capacity auto resolved" | Select-Object -Last 1
+      # max-context is only a limit; the pool is sized separately. Under pressure the engine
+      # reclaims prefixes or pauses requests, so a short pool shows up as slowdowns.
+      $kv = docker logs $Container 2>&1 | Select-String -Pattern "context \| device" | Select-Object -Last 1
       if ($kv) {
-        $i = $kv.Line.IndexOf("KV capacity")
+        $i = $kv.Line.IndexOf("context | device")
         Write-Host ("  " + $kv.Line.Substring($i))
       }
-      Write-Host "  Check that pages=N/N match. If they differ, VRAM was short and the cache" -ForegroundColor Yellow
-      Write-Host "  was silently downsized rather than refusing to start." -ForegroundColor Yellow
+      Write-Host "  Check that 'KV ~N tokens' covers the limit. If not, raise NINFER_CONTEXT_CAPACITY." -ForegroundColor Yellow
     }
   }
 
@@ -216,8 +227,8 @@ switch ($Action.ToLower()) {
     $map = @{ "nvfp4" = "qwen3_8_27b_nvfp4.ninfer"; "groupwise" = "qwen3_8_27b.ninfer" }
     if (-not $Value -or -not $map.ContainsKey($Value.ToLower())) {
       Write-Host "Usage: .\VH-Model.ps1 artifact <nvfp4|groupwise>" -ForegroundColor Red
-      Write-Host "  nvfp4      20.02 GiB, ~183 tok/s   (current default)"
-      Write-Host "  groupwise  16.96 GiB, ~166 tok/s, ~3 GiB more VRAM headroom"
+      Write-Host "  nvfp4      20.02 GiB   (current default)"
+      Write-Host "  groupwise  16.96 GiB, ~3 GiB more VRAM headroom"
       exit 1
     }
     $file = $map[$Value.ToLower()]

@@ -90,7 +90,8 @@ foreach ($a in $wanted) {
     Copy-Item -LiteralPath $src $Bundle
 }
 if ($IncludeArtifacts -eq "none") {
-    Write-Host "  (artifacts excluded -- target downloads from HuggingFace, hashes in deploy\PORTABLE.md)"
+    Write-Host "  (artifacts excluded -- rerun with -IncludeArtifacts nvfp4 unless the target already has"
+    Write-Host "   the upgraded v3 file; hashes in deploy\PORTABLE.md)"
 }
 
 # -- 4. Manifest --------------------------------------------------------------
