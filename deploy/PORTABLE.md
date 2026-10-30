@@ -126,7 +126,7 @@ Then three checks, all required:
 
 1. `curl http://127.0.0.1:3400/v1/models` → id `qwen/qwen3.8-27b`.
 2. `docker logs vigil-chat-model | findstr "context"` → `device 6.00 GiB` and `KV ~N tokens`
-   with N at least 131072 (about 163k is expected). `nvidia-smi` should show 3.2–4.0 GiB free.
+   with N at least 131072 (about 163k is expected). `nvidia-smi` should show 3.0–4.0 GiB free, depending on what else holds the card.
 3. **Tool-call smoke** — the thing Hermes actually depends on; a plain completion
    proves very little (bash, key from `.env`):
 

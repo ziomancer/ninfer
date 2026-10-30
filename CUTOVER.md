@@ -202,7 +202,7 @@ Flag changes: `--kv-capacity auto` → `--context-capacity 6GiB`, `--lm-head-dra
 `--no-vision`, and `--pending-timeout 600s`, because 290 requests had expired at the 30s default.
 
 - **Context capacity must stay explicit.** `auto` took the pool to 9.75 GiB and left 687 MiB free.
-  6 GiB estimates ~163k KV tokens, leaving 4.0 GiB free, or 3.2 GiB after an embedder restart.
+  6 GiB estimates ~163k KV tokens, leaving 3.0-4.0 GiB free. The low end follows an embedder restart. `Start-VHStack.ps1` also starts the vision embedder, which costs about another 0.5 GiB.
 - **Decode held:** 159.2 tok/s before, 154.3 and 160.8 after (`bench/RESULTS.md`). The old 181 tok/s
   figure was not reproduced by the old engine on this date either, so it is not a regression.
 - Verified: tool calls (streaming too), a 100,050-token prompt with prefix reuse on repeat, a request
