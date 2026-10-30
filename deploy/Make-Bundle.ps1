@@ -54,7 +54,7 @@ if ($LASTEXITCODE -ne 0) { throw "docker save failed" }
 # the fork (or doesn't need at all) — only the ops overlay travels in the bundle.
 # Deliberately NOT .env (per-host secrets) and NOT logs/ (host history).
 $files = @(
-    "docker-compose.yml", "VH-Model.ps1", ".env.example", "CUTOVER.md",
+    "docker-compose.yml", "VH-Model.ps1", "VH-Model-Toggle.cmd", ".env.example", "CUTOVER.md",
     "bench\bench.sh", "bench\RESULTS.md",
     "tools\check-collapse.sh",
     "deploy\PORTABLE.md"

@@ -191,6 +191,10 @@ profiles, scripts) and repoint them to 3400 (chat) / their real embedding endpoi
   insist on `pages=N/N`.
 - Watchdog: `.\VH-Model.ps1 health` (`tools/check-collapse.sh`). It reads
   `logs/requests.jsonl`, which is append-only and never rotated — prune manually.
+- Loading/evicting without a shell: **double-click `VH-Model-Toggle.cmd`** (ships in
+  the bundle). It runs `VH-Model.ps1 toggle` — evict if the model is up, load if it
+  is down — in a console that stays open so you can read the closing VRAM line. For
+  a Desktop button, right-click it → Send to → Desktop (create shortcut).
 
 ## Boot integration
 

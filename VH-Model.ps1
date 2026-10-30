@@ -6,7 +6,8 @@
   docker compose project in this directory; every setting is a knob in .env.
 
   Usage:
-    .\VH-Model.ps1                 # status (default)
+    .\VH-Model.ps1                 # status (default -- prints only, changes nothing)
+    .\VH-Model.ps1 toggle          # flip it: evict if it is up, load if it is down
     .\VH-Model.ps1 stop            # evict the model, free ~24 GiB VRAM
     .\VH-Model.ps1 start           # load the model, wait until it serves
     .\VH-Model.ps1 restart
@@ -93,6 +94,21 @@ function Invoke-Compose([string[]]$ComposeArgs) {
     finally { Pop-Location }
 }
 
+# `down`, not `stop`: a stopped-but-present container still owns the compose network
+# and would be revived by `restart: unless-stopped` on the next Docker daemon start.
+function Stop-Model {
+    Write-Host "Evicting the model (frees its VRAM) ..." -ForegroundColor Cyan
+    Invoke-Compose @("down")
+    Show-Vram
+    Write-Host "Stopped. Hermes has no chat model until you switch it back on." -ForegroundColor Yellow
+}
+
+function Start-Model {
+    Write-Host "Loading the model ..." -ForegroundColor Cyan
+    Invoke-Compose @("up","-d")
+    if (Wait-Serving) { Show-Vram }
+}
+
 switch ($Action.ToLower()) {
 
   "status" {
@@ -127,22 +143,27 @@ switch ($Action.ToLower()) {
       Write-Host "  VRAM -- only one engine's weights fit on this card." -ForegroundColor Yellow
     }
     Write-Host ""
-    Write-Host "  verbs: start | stop | restart | parity | context <n> | artifact <nvfp4|groupwise> | logs | health"
+    Write-Host "  verbs: toggle | start | stop | restart | parity | context <n> | artifact <nvfp4|groupwise> | logs | health"
     Write-Host ""
   }
 
-  "stop" {
-    Write-Host "Evicting the model (frees its VRAM) ..." -ForegroundColor Cyan
-    Invoke-Compose @("down")
-    Show-Vram
-    Write-Host "Stopped. Hermes has no chat model until you 'start' again." -ForegroundColor Yellow
+  "toggle" {
+    # Container STATE decides the flip, not /health. A container that is up but not
+    # serving yet is still holding its VRAM, so the useful move there is still to
+    # evict -- and a crash-looping one ("restarting") is exactly what you want off.
+    $state = Get-State
+    if ($state -in @("running", "restarting", "paused")) {
+      Write-Host ("Model is " + $state + " -- switching it OFF.") -ForegroundColor Cyan
+      Stop-Model
+    } else {
+      Write-Host ("Model is " + $state + " -- switching it ON.") -ForegroundColor Cyan
+      Start-Model
+    }
   }
 
-  "start" {
-    Write-Host "Loading the model ..." -ForegroundColor Cyan
-    Invoke-Compose @("up","-d")
-    if (Wait-Serving) { Show-Vram }
-  }
+  "stop"  { Stop-Model }
+
+  "start" { Start-Model }
 
   "restart" {
     Invoke-Compose @("down")
@@ -212,7 +233,7 @@ switch ($Action.ToLower()) {
       Show-Vram
       Write-Host "  NOTE: draft-tokens tuning does NOT transfer between artifacts." -ForegroundColor Yellow
       Write-Host "  Measured optimum: nvfp4 -> 4;  groupwise -> 2..4 (flat)." -ForegroundColor Yellow
-      Write-Host "  Re-check with bench\bench.sh after switching." -ForegroundColor Yellow
+      Write-Host "  Re-check with bench/bench.sh after switching." -ForegroundColor Yellow
     }
   }
 
@@ -225,7 +246,7 @@ switch ($Action.ToLower()) {
 
   default {
     Write-Host ("Unknown action '" + $Action + "'.") -ForegroundColor Red
-    Write-Host "verbs: status | start | stop | restart | parity | context <n> | artifact <nvfp4|groupwise> | logs | health"
+    Write-Host "verbs: status | toggle | start | stop | restart | parity | context <n> | artifact <nvfp4|groupwise> | logs | health"
     exit 1
   }
 }
